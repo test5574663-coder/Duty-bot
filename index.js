@@ -463,7 +463,7 @@ client.on("presenceUpdate", async (oldP, newP) => {
         const ch = await client.channels.fetch(day.channelId).catch(() => null);
         if (!ch) return;
 
-        await sendOrUpdate(ch, member, user, today, "Tự off (Thoát GTA)", ref);
+        await sendOrUpdate(ch, member, user, today, "Tự off (Alt lấy lợi thế)", ref);
       }
     }
   } catch (err) {
