@@ -6,8 +6,7 @@ const {
   EmbedBuilder,
   SlashCommandBuilder,
   REST,
-  Routes,
-  MessageFlags
+  Routes
 } = require("discord.js");
 
 const admin = require("firebase-admin");
@@ -25,20 +24,24 @@ const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const ROLE_MANAGER = process.env.ROLE_MANAGER;
+const ROLE_MANAGER = process.env.ROLE_MANAGER || "";
 const ROLE_INTERN = process.env.ROLE_INTERN || "";
+const GTA_NAME = (process.env.GTA_ACTIVITY || "").toLowerCase();
 
 // ================= CLIENT =================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences
   ]
 });
 
 // ================= TIME UTILS =================
 function nowVN() {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" })
+  );
 }
 
 function dateKey() {
@@ -62,6 +65,21 @@ function diffText(ms) {
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
   return `${h} giờ ${m} phút`;
+}
+
+function isPlaying(member) {
+  if (!GTA_NAME) return false;
+
+  const activities = member.presence?.activities || [];
+
+  console.log(
+    `[CHECK ACTIVITY] ${member.user.tag}:`,
+    activities.map(a => a.name)
+  );
+
+  return activities.some(
+    a => a.name?.toLowerCase() === GTA_NAME
+  );
 }
 
 // ================= FIRESTORE UTILS =================
@@ -125,7 +143,7 @@ function buildEmbed(member, user, dayKeyValue, status) {
     .setColor(0x2ecc71)
     .setTitle("BẢNG ONDUTY")
     .setDescription(
-      `**Tên Nhân Sự:** ${member}
+`**Tên Nhân Sự:** ${member}
 
 **Biển Số:** ${day.plate || "Chưa có"}
 
@@ -145,40 +163,43 @@ ${timeline || "Chưa có dữ liệu"}
 
 // ================= SEND / UPDATE EMBED =================
 async function sendOrUpdate(channel, member, user, dayKeyValue, status, ref) {
-  const day = user.days?.[dayKeyValue];
-  if (!day) return;
-
-  const embed = buildEmbed(member, user, dayKeyValue, status);
-  if (!embed) return;
-
-  // Cập nhật embed cũ nếu có
-  if (day.messageId && day.channelId) {
-    try {
-      const ch = await client.channels.fetch(day.channelId).catch(() => null);
-      const msg = ch ? await ch.messages.fetch(day.messageId).catch(() => null) : null;
-      if (msg) {
-        await msg.edit({
-          content: `<@${member.id}>`,
-          embeds: [embed]
-        });
-        return;
-      }
-    } catch (err) {
-      console.error("⚠️ Không update được embed cũ:", err);
-    }
-  }
-
-  // Gửi embed mới
   try {
+    const day = user.days?.[dayKeyValue];
+    if (!day) return;
+
+    const embed = buildEmbed(member, user, dayKeyValue, status);
+    if (!embed) return;
+
+    // Update embed cũ nếu còn
+    if (day.messageId && day.channelId) {
+      try {
+        const ch = await client.channels.fetch(day.channelId).catch(() => null);
+        const msg = ch ? await ch.messages.fetch(day.messageId).catch(() => null) : null;
+
+        if (msg) {
+          await msg.edit({
+            content: `<@${member.id}>`,
+            embeds: [embed]
+          });
+          return;
+        }
+      } catch (err) {
+        console.error("⚠️ Không update được embed cũ:", err);
+      }
+    }
+
+    // Gửi embed mới
     const msg = await channel.send({
       content: `<@${member.id}>`,
       embeds: [embed]
     });
+
     day.messageId = msg.id;
     day.channelId = channel.id;
+
     await saveUser(ref, user);
   } catch (err) {
-    console.error("❌ Lỗi khi gửi embed mới:", err);
+    console.error("❌ sendOrUpdate lỗi:", err);
   }
 }
 
@@ -288,10 +309,8 @@ client.on("interactionCreate", async i => {
   if (!i.isChatInputCommand()) return;
 
   try {
-    const hiddenCommands = ["onduty", "offduty", "thaybienso", "forceoff"];
-    await i.deferReply({
-      flags: hiddenCommands.includes(i.commandName) ? MessageFlags.Ephemeral : undefined
-    });
+    const hiddenCommands = new Set(["onduty", "offduty", "thaybienso", "forceoff"]);
+    await i.deferReply({ ephemeral: hiddenCommands.has(i.commandName) });
 
     const member = await i.guild.members.fetch(i.user.id);
     const { ref, data: user } = await getUser(member.id);
@@ -300,6 +319,10 @@ client.on("interactionCreate", async i => {
 
     // ================= ONDUTY =================
     if (i.commandName === "onduty") {
+      if (GTA_NAME && !isPlaying(member)) {
+        return i.editReply("❌ Bạn phải vào game trước khi ON DUTY");
+      }
+
       if (day.sessions.some(s => !s.end)) {
         return i.editReply("❌ Bạn đang ON DUTY rồi");
       }
@@ -308,9 +331,12 @@ client.on("interactionCreate", async i => {
       day.sessions.push({ start: Date.now(), end: null });
 
       await saveUser(ref, user);
-      await sendOrUpdate(i.channel, member, user, today, "Đang trực", ref);
+      await i.editReply("✅ ON DUTY");
 
-      return i.editReply("✅ ON DUTY");
+      void sendOrUpdate(i.channel, member, user, today, "Đang trực", ref)
+        .catch(console.error);
+
+      return;
     }
 
     // ================= OFFDUTY =================
@@ -324,9 +350,12 @@ client.on("interactionCreate", async i => {
       user.total += last.end - last.start;
 
       await saveUser(ref, user);
-      await sendOrUpdate(i.channel, member, user, today, "Tự OFF", ref);
+      await i.editReply("🔴 OFF DUTY");
 
-      return i.editReply("🔴 OFF DUTY");
+      void sendOrUpdate(i.channel, member, user, today, "Tự OFF", ref)
+        .catch(console.error);
+
+      return;
     }
 
     // ================= THAY BIỂN =================
@@ -339,9 +368,12 @@ client.on("interactionCreate", async i => {
       day.plate = i.options.getString("bienso");
 
       await saveUser(ref, user);
-      await sendOrUpdate(i.channel, member, user, today, "Đổi biển số", ref);
+      await i.editReply("✅ Đã đổi biển số");
 
-      return i.editReply("✅ Đã đổi biển số");
+      void sendOrUpdate(i.channel, member, user, today, "Đổi biển số", ref)
+        .catch(console.error);
+
+      return;
     }
 
     // ================= PENALTY / ADJUST =================
@@ -374,9 +406,12 @@ client.on("interactionCreate", async i => {
       }
 
       await saveUser(r, target);
-      await sendOrUpdate(i.channel, targetMember, target, today, status, r);
+      await i.editReply(`✅ ${status}`);
 
-      return i.editReply(`✅ ${status}`);
+      void sendOrUpdate(i.channel, targetMember, target, today, status, r)
+        .catch(console.error);
+
+      return;
     }
 
     // ================= FORCE OFF =================
@@ -402,11 +437,13 @@ client.on("interactionCreate", async i => {
       target.total += last.end - last.start;
 
       await saveUser(r, target);
+      await i.editReply("🚫 Force OFF thành công");
 
       const targetMember = await i.guild.members.fetch(targetUser.id);
-      await sendOrUpdate(i.channel, targetMember, target, today, "Force OFF", r);
+      void sendOrUpdate(i.channel, targetMember, target, today, "Force OFF", r)
+        .catch(console.error);
 
-      return i.editReply("🚫 Force OFF thành công");
+      return;
     }
   } catch (err) {
     console.error("❌ interactionCreate lỗi:", err);
@@ -418,6 +455,50 @@ client.on("interactionCreate", async i => {
         await i.reply({ content: "❌ Có lỗi xảy ra khi xử lý lệnh.", ephemeral: true });
       }
     } catch {}
+  }
+});
+
+// ================= AUTO OFF KHI THOÁT GAME =================
+client.on("presenceUpdate", async (oldP, newP) => {
+  if (!GTA_NAME) return;
+
+  try {
+    const member = newP?.member;
+    if (!member) return;
+
+    const wasPlaying = oldP?.activities?.some(a =>
+      a.name?.toLowerCase().includes(GTA_NAME)
+    ) || false;
+
+    const isNowPlaying = newP?.activities?.some(a =>
+      a.name?.toLowerCase().includes(GTA_NAME)
+    ) || false;
+
+    // từ chơi -> không chơi
+    if (wasPlaying && !isNowPlaying) {
+      const { ref, data: user } = await getUser(member.id);
+      const today = dateKey();
+      const day = user.days?.[today];
+      if (!day) return;
+
+      const last = day.sessions.find(s => !s.end);
+      if (!last) return;
+
+      last.end = Date.now();
+      user.total += last.end - last.start;
+
+      await saveUser(ref, user);
+
+      if (day.channelId) {
+        const ch = await client.channels.fetch(day.channelId).catch(() => null);
+        if (!ch) return;
+
+        void sendOrUpdate(ch, member, user, today, "Tự off (Thoát game)", ref)
+          .catch(console.error);
+      }
+    }
+  } catch (err) {
+    console.error("❌ presenceUpdate lỗi:", err);
   }
 });
 
@@ -441,6 +522,7 @@ setInterval(async () => {
       try {
         const snap = await doc.get();
         const user = snap.data();
+        if (!user) continue;
 
         const keys = Object.keys(user.days || {});
         const lastKey = keys[keys.length - 1];
@@ -467,7 +549,8 @@ setInterval(async () => {
           const ch = await client.channels.fetch(day.channelId).catch(() => null);
           if (!ch) continue;
 
-          await sendOrUpdate(ch, member, user, lastKey, "Tự off (Qua ngày mới)", doc);
+          void sendOrUpdate(ch, member, user, lastKey, "Tự off (Qua ngày mới)", doc)
+            .catch(console.error);
         }
       } catch (err) {
         console.error(`❌ Lỗi reset user ${doc.id}:`, err);
